@@ -135,6 +135,55 @@ acer_wmi_apgeaction_exec_u64(u32 method_id, u64 in, u64 *out) {
 	return status;
 }
 
+struct quirk_entry {
+	u8 system_control_mode;
+	u8 usb_charge_mode;
+};
+
+static struct quirk_entry *quirks;
+static struct quirk_entry quirk_unknown = {
+};
+static struct quirk_entry quirk_acer_system_control_mode = {
+	.system_control_mode = 1,
+};
+static struct quirk_entry quirk_acer_sfg174_73 = {
+	.system_control_mode = 1, // Enable system control mode for this model
+	.usb_charge_mode = 1, // Enable USB charge mode for this model
+};
+
+ /*
+  * This quirk table is only for Acer/Gateway/Packard Bell family
+  * that those machines are supported by acer-wmi driver.
+  */
+static int __init dmi_matched(const struct dmi_system_id *dmi)
+{
+	pr_info("DMI matched: %s\n", dmi->ident);
+	quirks = dmi->driver_data;
+	return 1;
+}
+
+static const struct dmi_system_id acer_quirks[] __initconst = {
+	{
+		.callback = dmi_matched,
+		.ident = "Acer Swift SFG14-73",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Swift SFG14-73"),
+		},
+		.driver_data = &quirk_acer_sfg174_73,
+	},
+};
+
+/* Find which quirks are needed for a particular vendor/ model pair */
+static void __init find_quirks(void)
+{
+	// For this module, only dynamically loaded quirks are supported.
+	dmi_check_system(acer_quirks);
+
+	if (quirks == NULL)
+		quirks = &quirk_unknown;
+}
+
 static acpi_status
 get_battery_health_control_status(struct battery_info *bat_status)
 {
@@ -384,33 +433,46 @@ static ssize_t system_control_mode_store(struct device_driver *driver,
 	return count;
 }
 
+static int usb_charge_mode_enable = 0;
+static void init_usb_charge_mode(void)
+{
+	acpi_status status;
+	u64 result;
+
+	if (quirks->usb_charge_mode == 0) {
+		pr_info("USB charging mode quirk not enabled, skipping initialization\n");
+		return;
+	}
+
+	if (!wmi_has_guid(WMI_GUID2)) {
+		pr_info("Acer USB charging control guid not found\n");
+		return;
+	}
+
+	status = acer_wmi_apgeaction_exec_u64(ACER_WMID_GET_FUNCTION, 0x4, &result);
+	if (ACPI_FAILURE(status)) {
+		pr_err("Error getting usb charging status: %s\n", acpi_format_exception(status));
+		return;
+	}
+
+	pr_info("usb charging get status: %llu\n", result);
+	switch (result) {
+	case 663296: // Turn off usb charging
+		usb_charge_mode_enable = 0;
+		break;
+	case 659200: // Set usb charging to 10%
+	case 1314560: // Set usb charging to 20%
+	case 1969920: // Set usb charging to 30%
+		usb_charge_mode_enable = 1;
+		break;
+	default:
+		usb_charge_mode_enable = -1; // Unknown value
+	}
+}
+
 static ssize_t usb_charge_mode_show(struct device_driver *driver, char *buf)
 {
-     acpi_status status;
-     u64 result;
-	 int ret;
-
-     status = acer_wmi_apgeaction_exec_u64(ACER_WMID_GET_FUNCTION, 0x4, &result);
-     if (ACPI_FAILURE(status)) {
-         pr_err("Error getting usb charging status: %s\n", acpi_format_exception(status));
-         return -ENODEV;
-     }
-
-     pr_info("usb charging get status: %llu\n", result);
-	 switch (result) {
-		case 663296: // Turn off usb charging
-			ret = 0;
-			break;
-		case 659200: // Set usb charging to 10%
-		case 1314560: // Set usb charging to 20%
-		case 1969920: // Set usb charging to 30%
-			ret = 1;
-			break;
-		default:
-			ret = -1; // Unknown value
-	 }
-
-     return sprintf(buf, "%d\n", ret); //-1 means unknown value
+     return sprintf(buf, "%d\n", usb_charge_mode_enable); //-1 means unknown value
 }
 
 static ssize_t usb_charge_mode_store(struct device_driver *driver,
@@ -420,6 +482,11 @@ static ssize_t usb_charge_mode_store(struct device_driver *driver,
 	u64 result;
 	u64 input_value;
 	u8 val;
+
+	if (quirks->usb_charge_mode == 0) {
+		pr_info("USB charging mode quirk not enabled, skipping store\n");
+		return -EOPNOTSUPP;
+	}
 
 	if (sscanf(buf, "%hhd", &val) != 1)
 		return -EINVAL;
@@ -437,6 +504,7 @@ static ssize_t usb_charge_mode_store(struct device_driver *driver,
 	}
 
 	pr_info("usb charging set value: %d\n", val);
+	usb_charge_mode_enable = val;
 	status = acer_wmi_apgeaction_exec_u64(ACER_WMID_SET_FUNCTION, input_value, &result);
 
 	if (ACPI_FAILURE(status)) {
@@ -454,6 +522,11 @@ static ssize_t usb_charge_limit_show(struct device_driver *driver, char *buf)
      acpi_status status;
      u64 result;
 	 int ret;
+
+	 if (quirks->usb_charge_mode == 0) {
+		 pr_info("USB charging limit quirk not enabled, skipping show\n");
+		 return -EOPNOTSUPP;
+	 }
 
      status = acer_wmi_apgeaction_exec_u64(ACER_WMID_GET_FUNCTION, 0x4, &result);
      if (ACPI_FAILURE(status)) {
@@ -473,7 +546,7 @@ static ssize_t usb_charge_limit_show(struct device_driver *driver, char *buf)
 			ret = 30;
 			break;
 		default:
-			ret = -1; // Unknown value
+			ret = -1; // Unknown value or off
 	 }
 
      return sprintf(buf, "%d\n", ret); //-1 means unknown value
@@ -487,6 +560,17 @@ static ssize_t usb_charge_limit_store(struct device_driver *driver,
 	u64 result;
 	u64 input_value;
 	u8 val;
+
+	if (quirks->usb_charge_mode == 0) {
+		pr_info("USB charging limit quirk not enabled, skipping store\n");
+		return -EOPNOTSUPP;
+	}
+
+	// Ensure current value isn't 'off'
+	if (usb_charge_mode_enable == 0) {
+		pr_err("USB charging is off, cannot set limit\n");
+		return -EINVAL;
+	}
 
 	if (sscanf(buf, "%hhd", &val) != 1)
 		return -EINVAL;
@@ -582,50 +666,6 @@ acer_system_control_mode_init(void)
 	}
 
 	return 0;
-}
-
-struct quirk_entry {
-	u8 system_control_mode;
-};
-
-static struct quirk_entry *quirks;
-static struct quirk_entry quirk_unknown = {
-};
-static struct quirk_entry quirk_acer_system_control_mode = {
-	.system_control_mode = 1,
-};
-
- /*
-  * This quirk table is only for Acer/Gateway/Packard Bell family
-  * that those machines are supported by acer-wmi driver.
-  */
-static int __init dmi_matched(const struct dmi_system_id *dmi)
-{
-	pr_info("DMI matched: %s\n", dmi->ident);
-	quirks = dmi->driver_data;
-	return 1;
-}
-
-static const struct dmi_system_id acer_quirks[] __initconst = {
-	{
-		.callback = dmi_matched,
-		.ident = "Acer Swift SFG14-73",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "Swift SFG14-73"),
-		},
-		.driver_data = &quirk_acer_system_control_mode,
-	},
-};
-
-/* Find which quirks are needed for a particular vendor/ model pair */
-static void __init find_quirks(void)
-{
-	// For this module, only dynamically loaded quirks are supported.
-	dmi_check_system(acer_quirks);
-
-	if (quirks == NULL)
-		quirks = &quirk_unknown;
 }
 
 /*
@@ -839,6 +879,10 @@ static int __init acer_wmi_ext_init(void)
 	
 	if (quirks->system_control_mode) {
 		acer_system_control_mode_init();
+	}
+
+	if (quirks->usb_charge_mode) {
+		init_usb_charge_mode();
 	}
 
 	err = platform_driver_register(&acer_ext_platform_driver);
