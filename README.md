@@ -73,6 +73,28 @@ of the calibration is not yet handled by the module:
 echo 0 | sudo tee /sys/bus/wmi/drivers/acer-wmi-ext/calibration_mode
 ```
 
+### Fan Profiles
+
+The fan profiles can then be set as follows:
+```
+echo 1 | sudo tee /sys/bus/wmi/drivers/acer-wmi-ext/system_control_mode
+```
+
+The following profiles are as follows:
+
+- `1`: Balanced
+- `2`: Quiet
+- `3`: Performance
+
+They are also hooked into platform power profiles and thus can be controlled
+using power-profiles-daemon and the desktop environment.
+
+Alternatively, you can set it at module initialization
+time:
+```
+sudo insmod acer-wmi-ext.ko enable_system_control_mode=1
+```
+
 ### Related work
 
 The EC setting for the SFG14-73's fan profiles were from @YFHD-osu and can be found in
