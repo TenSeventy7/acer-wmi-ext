@@ -32,7 +32,11 @@ MODULE_DESCRIPTION("Acer WMI control extension driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Frederik Harwath <frederik@harwath.name>, John Vincent Corcega <git@tenseventyseven.xyz>");
 #define WMI_GUID1 	"79772EC5-04B1-4bfd-843C-61E7F77B6CC9"
+#define WMI_GUID2	"61EF69EA-865C-4BC3-A502-A0DEBA0CB531"
 MODULE_ALIAS("wmi:" WMI_GUID1);
+
+#define ACER_WMID_SET_FUNCTION 1
+#define ACER_WMID_GET_FUNCTION 2
 
 #ifdef pr_fmt
 #undef pr_fmt
@@ -94,6 +98,42 @@ MODULE_PARM_DESC(
 	enable_system_control_mode,
 	"Set system fan control mode (0: balanced, 1: silent, 2: performance) during "
 	"module initialization (default value < 0: do not modify existing settings.)");
+
+
+ /*
+  * WMID ApgeAction interface
+  */
+static acpi_status
+acer_wmi_apgeaction_exec_u64(u32 method_id, u64 in, u64 *out) {
+	struct acpi_buffer input = { (acpi_size) sizeof(u64), (void *)(&in) };
+	struct acpi_buffer result = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	u64 tmp = 0;
+	acpi_status status;
+	status = wmi_evaluate_method(WMI_GUID2, 0, method_id, &input, &result);
+
+	if (ACPI_FAILURE(status))
+		return status;
+	obj = (union acpi_object *) result.pointer;
+
+	if (obj) {
+		if (obj->type == ACPI_TYPE_BUFFER) {
+			if (obj->buffer.length == sizeof(u32))
+				tmp = *((u32 *) obj->buffer.pointer);
+			else if (obj->buffer.length == sizeof(u64))
+				tmp = *((u64 *) obj->buffer.pointer);
+		} else if (obj->type == ACPI_TYPE_INTEGER) {
+			tmp = (u64) obj->integer.value;
+		}
+	}
+
+	if (out)
+		*out = tmp;
+
+	kfree(result.pointer);
+
+	return status;
+}
 
 static acpi_status
 get_battery_health_control_status(struct battery_info *bat_status)
@@ -344,12 +384,148 @@ static ssize_t system_control_mode_store(struct device_driver *driver,
 	return count;
 }
 
+static ssize_t usb_charge_mode_show(struct device_driver *driver, char *buf)
+{
+     acpi_status status;
+     u64 result;
+	 int ret;
+
+     status = acer_wmi_apgeaction_exec_u64(ACER_WMID_GET_FUNCTION, 0x4, &result);
+     if (ACPI_FAILURE(status)) {
+         pr_err("Error getting usb charging status: %s\n", acpi_format_exception(status));
+         return -ENODEV;
+     }
+
+     pr_info("usb charging get status: %llu\n", result);
+	 switch (result) {
+		case 663296: // Turn off usb charging
+			ret = 0;
+			break;
+		case 659200: // Set usb charging to 10%
+		case 1314560: // Set usb charging to 20%
+		case 1969920: // Set usb charging to 30%
+			ret = 1;
+			break;
+		default:
+			ret = -1; // Unknown value
+	 }
+
+     return sprintf(buf, "%d\n", ret); //-1 means unknown value
+}
+
+static ssize_t usb_charge_mode_store(struct device_driver *driver,
+				      const char *buf, size_t count)
+{
+	acpi_status status;
+	u64 result;
+	u64 input_value;
+	u8 val;
+
+	if (sscanf(buf, "%hhd", &val) != 1)
+		return -EINVAL;
+
+	switch (val) {
+	case 0:
+		input_value = 663300; // Turn off usb charging
+		break;
+	case 1:
+		input_value = 1969924; // Set usb charging to 30%
+		break;
+	default:
+		pr_err("Unknown usb charging value: %d\n", val);
+		return -EINVAL;
+	}
+
+	pr_info("usb charging set value: %d\n", val);
+	status = acer_wmi_apgeaction_exec_u64(ACER_WMID_SET_FUNCTION, input_value, &result);
+
+	if (ACPI_FAILURE(status)) {
+		pr_err("Error setting usb charging status: %s\n", acpi_format_exception(status));
+		return -ENODEV;
+	}
+
+	pr_info("usb charging set status: %llu\n", result);
+	return count;
+}
+
+static ssize_t usb_charge_limit_show(struct device_driver *driver, char *buf)
+{
+
+     acpi_status status;
+     u64 result;
+	 int ret;
+
+     status = acer_wmi_apgeaction_exec_u64(ACER_WMID_GET_FUNCTION, 0x4, &result);
+     if (ACPI_FAILURE(status)) {
+         pr_err("Error getting usb charging limit: %s\n", acpi_format_exception(status));
+         return -ENODEV;
+     }
+
+     pr_info("usb charging get limit: %llu\n", result);
+	 switch (result) {
+		case 659200: // Set usb charging to 10%
+			ret = 10;
+			break;
+		case 1314560: // Set usb charging to 20%
+			ret = 20;
+			break;
+		case 1969920: // Set usb charging to 30%
+			ret = 30;
+			break;
+		default:
+			ret = -1; // Unknown value
+	 }
+
+     return sprintf(buf, "%d\n", ret); //-1 means unknown value
+
+}
+
+static ssize_t usb_charge_limit_store(struct device_driver *driver,
+				      const char *buf, size_t count)
+{
+	acpi_status status;
+	u64 result;
+	u64 input_value;
+	u8 val;
+
+	if (sscanf(buf, "%hhd", &val) != 1)
+		return -EINVAL;
+
+	switch (val) {
+	case 10:
+		input_value = 659204; // Set usb charging to 10%
+		break;
+	case 20:
+		input_value = 1314564; // Set usb charging to 20%
+		break;
+	case 30:
+		input_value = 1969924; // Set usb charging to 30%
+		break;
+	default:
+		pr_err("Unknown usb charging limit value: %d\n", val);
+		return -EINVAL;
+	}
+
+	pr_info("usb charging set limit value: %d\n", val);
+	status = acer_wmi_apgeaction_exec_u64(ACER_WMID_SET_FUNCTION, input_value, &result);
+
+	if (ACPI_FAILURE(status)) {
+		pr_err("Error setting usb charging limit: %s\n", acpi_format_exception(status));
+		return -ENODEV;
+	}
+
+	pr_info("usb charging set limit: %llu\n", result);
+	return count;
+}
+
 static DRIVER_ATTR_RW(health_mode);
 static DRIVER_ATTR_RW(calibration_mode);
 static DRIVER_ATTR_RW(system_control_mode);
+static DRIVER_ATTR_RW(usb_charge_mode);
+static DRIVER_ATTR_RW(usb_charge_limit);
 
 static struct attribute *acer_wmi_ext_attrs[] = {
-	&driver_attr_health_mode.attr, &driver_attr_calibration_mode.attr, &driver_attr_system_control_mode.attr, NULL
+	&driver_attr_health_mode.attr, &driver_attr_calibration_mode.attr, &driver_attr_system_control_mode.attr, &driver_attr_usb_charge_mode.attr, &driver_attr_usb_charge_limit.attr, NULL
 };
 
 ATTRIBUTE_GROUPS(acer_wmi_ext);
@@ -445,7 +621,6 @@ static const struct dmi_system_id acer_quirks[] __initconst = {
 /* Find which quirks are needed for a particular vendor/ model pair */
 static void __init find_quirks(void)
 {
-
 	// For this module, only dynamically loaded quirks are supported.
 	dmi_check_system(acer_quirks);
 
