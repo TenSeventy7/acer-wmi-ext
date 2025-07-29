@@ -1,4 +1,4 @@
-obj-m += acer-wmi-battery.o
+obj-m += acer-wmi-ext.o
 PWD := $(CURDIR)
 
 all:
